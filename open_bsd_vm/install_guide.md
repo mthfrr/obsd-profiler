@@ -41,3 +41,28 @@ ssh-copy-id -p 10022 root@localhost
 ```
 
 `halt -p` to power off
+
+## 6. Install stuff
+
+upgrade
+
+```sh
+TERM=xterm pkg_add -u
+```
+
+### Setup ports
+
+```sh
+cd /tmp
+ftp https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/{ports.tar.gz,SHA256.sig}
+signify -Cp /etc/signify/openbsd-$(uname -r | cut -c 1,3)-base.pub -x SHA256.sig ports.tar.gz
+
+cd /usr
+tar xzf /tmp/ports.tar.gz
+```
+
+### Install with ports
+
+```sh
+pkg_add portslist
+```
