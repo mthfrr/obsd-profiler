@@ -1,0 +1,6 @@
+*.o
+*.out
+*.iso
+*.qcow2
+
+cat/cat
