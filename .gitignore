@@ -2,5 +2,6 @@
 *.out
 *.iso
 *.qcow2
+*.so
 
 cat/cat
