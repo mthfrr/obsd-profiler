@@ -4,4 +4,4 @@ SRC=gmon.c mcount.c
 OUT=libpatch.so
 
 all:
-	$(CC) $(LDLAGS) $(SRC) -o $(OUT)
+	$(CC) $(CFLAGS) $(LDLAGS) $(SRC) -o $(OUT)
