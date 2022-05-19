@@ -1,6 +1,7 @@
 #!/bin/sh
 
 qemu-system-x86_64 \
+    --enable-kvm \
     -smp "cpus=4" \
     -m 4G \
     -hda obsd.qcow2 \

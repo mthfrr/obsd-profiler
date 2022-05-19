@@ -54,8 +54,8 @@ static int hertz(void);
 void monstartup(u_long lowpc, u_long highpc)
 {
     int o;
-    void *addr;
-    struct gmonparam *p = &_gmonparam;
+    void* addr;
+    struct gmonparam* p = &_gmonparam;
 
     /*
      * round lowpc and highpc to multiples of the density we're using
@@ -145,13 +145,13 @@ void _mcleanup(void)
     u_long frompc;
     int toindex;
     struct rawarc rawarc;
-    struct gmonparam *p = &_gmonparam;
+    struct gmonparam* p = &_gmonparam;
     struct gmonhdr gmonhdr, *hdr;
     struct clockinfo clockinfo;
     const int mib[2] = { CTL_KERN, KERN_CLOCKRATE };
     size_t size;
-    char *profdir;
-    char *proffile;
+    char* profdir;
+    char* proffile;
     char buf[PATH_MAX];
 #ifdef DEBUG
     int log, len;
@@ -186,7 +186,7 @@ void _mcleanup(void)
         long divisor;
 
         /* If PROFDIR contains a null value, no profiling
-           output is produced */
+          output is produced */
         if (*profdir == '\0')
         {
             return;
@@ -229,6 +229,7 @@ void _mcleanup(void)
         proffile = "gmon.out";
     }
 
+    printf("%d: ##### OPEN gmon.out #####\n", __LINE__);
     fd = open(proffile, O_CREAT | O_TRUNC | O_WRONLY, 0664);
     if (fd == -1)
     {
@@ -236,6 +237,7 @@ void _mcleanup(void)
         return;
     }
 #ifdef DEBUG
+    printf("%d: ##### OPEN gmon.log #####\n", __LINE__);
     log = open("gmon.log", O_CREAT | O_TRUNC | O_WRONLY, 0664);
     if (log == -1)
     {
@@ -245,16 +247,19 @@ void _mcleanup(void)
     }
     snprintf(dbuf, sizeof dbuf, "[mcleanup1] kcount 0x%x ssiz %d\n", p->kcount,
              p->kcountsize);
+    printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
     write(log, dbuf, strlen(dbuf));
 #endif
-    hdr = (struct gmonhdr *)&gmonhdr;
+    hdr = (struct gmonhdr*)&gmonhdr;
     bzero(hdr, sizeof(*hdr));
     hdr->lpc = p->lowpc;
     hdr->hpc = p->highpc;
     hdr->ncnt = p->kcountsize + sizeof(gmonhdr);
     hdr->version = GMONVERSION;
     hdr->profrate = clockinfo.profhz;
-    write(fd, (char *)hdr, sizeof *hdr);
+
+    printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
+    write(fd, (char*)hdr, sizeof *hdr);
     write(fd, p->kcount, p->kcountsize);
     endfrom = p->fromssize / sizeof(*p->froms);
     for (fromindex = 0; fromindex < endfrom; fromindex++)
@@ -272,11 +277,13 @@ void _mcleanup(void)
                            "[mcleanup2] frompc 0x%x selfpc 0x%x count %d\n",
                            frompc, p->tos[toindex].selfpc,
                            p->tos[toindex].count);
+            printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
             write(log, dbuf, strlen(dbuf));
 #endif
             rawarc.raw_frompc = frompc;
             rawarc.raw_selfpc = p->tos[toindex].selfpc;
             rawarc.raw_count = p->tos[toindex].count;
+            printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
             write(fd, &rawarc, sizeof rawarc);
         }
     }
@@ -307,12 +314,12 @@ void _mcleanup(void)
  */
 void moncontrol(int mode)
 {
-    struct gmonparam *p = &_gmonparam;
+    struct gmonparam* p = &_gmonparam;
 
     if (mode)
     {
         /* start */
-        profil((char *)p->kcount, p->kcountsize, p->lowpc, s_scale);
+        profil((char*)p->kcount, p->kcountsize, p->lowpc, s_scale);
         p->state = GMON_PROF_ON;
     }
     else
