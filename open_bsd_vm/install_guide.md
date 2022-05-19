@@ -19,7 +19,7 @@ qemu-img create -f qcow2 obsd.qcow2 30G
 ## 3. Start the vm and run the installer
 
 ```sh
-qemu-system-x86_64 -hda obsd.qcow2 -cdrom install71.iso -monitor stdio -display sdl
+qemu-system-x86_64 -hda obsd.qcow2 -cdrom install71.iso -monitor stdio
 ```
 
 ## 4. Install
