@@ -28,22 +28,29 @@
  * SUCH DAMAGE.
  */
 
-#include <fcntl.h>
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <sys/time.h>
 #include <sys/gmon.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
-#include <sys/time.h>
+// PATCH
+#define _POSIX_C_SOURCE 199309L
+#include <signal.h>
+#include <sys/ktrace.h>
+#include <err.h>
+// END PATCH
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <unistd.h>
 
 struct gmonparam _gmonparam = { GMON_PROF_OFF };
 
-static int s_scale;
+static int	s_scale;
 /* see profil(2) where this is describe (incorrectly) */
-#define SCALE_1_TO_1 0x10000L
+#define		SCALE_1_TO_1	0x10000L
 
 #define ERR(s) write(STDERR_FILENO, s, sizeof(s))
 
@@ -51,259 +58,277 @@ PROTO_NORMAL(moncontrol);
 PROTO_DEPRECATED(monstartup);
 static int hertz(void);
 
-void monstartup(u_long lowpc, u_long highpc)
+
+// PATCH
+#define START_SIZE 10
+
+struct gmon_trace
 {
-    int o;
-    void* addr;
-    struct gmonparam* p = &_gmonparam;
+	char* label;
+};
 
-    /*
-     * round lowpc and highpc to multiples of the density we're using
-     * so the rest of the scaling (here and in gprof) stays in ints.
-     */
-    p->lowpc = ROUNDDOWN(lowpc, HISTFRACTION * sizeof(HISTCOUNTER));
-    p->highpc = ROUNDUP(highpc, HISTFRACTION * sizeof(HISTCOUNTER));
-    p->textsize = p->highpc - p->lowpc;
-    p->kcountsize = p->textsize / HISTFRACTION;
-    p->hashfraction = HASHFRACTION;
-    p->fromssize = p->textsize / p->hashfraction;
-    p->tolimit = p->textsize * ARCDENSITY / 100;
-    if (p->tolimit < MINARCS)
-        p->tolimit = MINARCS;
-    else if (p->tolimit > MAXARCS)
-        p->tolimit = MAXARCS;
-    p->tossize = p->tolimit * sizeof(struct tostruct);
+struct gmon_trace* utrace_open(char* label, int __unused unused1,
+		int __unused unused2)
+{
+	struct gmon_trace* t = malloc(sizeof(struct gmon_trace));
+	t->label = label;
+	return t;
+}
 
-    addr = mmap(NULL, p->kcountsize, PROT_READ | PROT_WRITE,
-                MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (addr == MAP_FAILED)
-        goto mapfailed;
-    p->kcount = addr;
+void utrace_write(struct gmon_trace* t, void* data, size_t size)
+{
+	while (size > 0)
+	{
+		size_t chunk = size > KTR_USER_MAXLEN ? KTR_USER_MAXLEN : size;
+		size -= chunk;
+		if(utrace(t->label, data, chunk))
+			err(1, "utrace");
+		data += chunk;
+	}
+}
 
-    addr = mmap(NULL, p->fromssize, PROT_READ | PROT_WRITE,
-                MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (addr == MAP_FAILED)
-        goto mapfailed;
-    p->froms = addr;
+void utrace_close(struct gmon_trace* t)
+{
+	free(t);
+}
+// END PATCH
 
-    addr = mmap(NULL, p->tossize, PROT_READ | PROT_WRITE,
-                MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (addr == MAP_FAILED)
-        goto mapfailed;
-    p->tos = addr;
-    p->tos[0].link = 0;
+void
+monstartup(u_long lowpc, u_long highpc)
+{
+	int o;
+	void *addr;
+	struct gmonparam *p = &_gmonparam;
+	
+	/*
+	* round lowpc and highpc to multiples of the density we're using
+	* so the rest of the scaling (here and in gprof) stays in ints.
+	*/
+	p->lowpc = ROUNDDOWN(lowpc, HISTFRACTION * sizeof(HISTCOUNTER));
+	p->highpc = ROUNDUP(highpc, HISTFRACTION * sizeof(HISTCOUNTER));
+	p->textsize = p->highpc - p->lowpc;
+	p->kcountsize = p->textsize / HISTFRACTION;
+	p->hashfraction = HASHFRACTION;
+	p->fromssize = p->textsize / p->hashfraction;
+	p->tolimit = p->textsize * ARCDENSITY / 100;
+	if (p->tolimit < MINARCS)
+		p->tolimit = MINARCS;
+	else if (p->tolimit > MAXARCS)
+		p->tolimit = MAXARCS;
+	p->tossize = p->tolimit * sizeof(struct tostruct);
 
-    o = p->highpc - p->lowpc;
-    if (p->kcountsize < o)
-    {
+	addr = mmap(NULL, p->kcountsize,  PROT_READ|PROT_WRITE,
+	   MAP_ANON|MAP_PRIVATE, -1, 0);
+	if (addr == MAP_FAILED)
+		goto mapfailed;
+	p->kcount = addr;
+
+	addr = mmap(NULL, p->fromssize,  PROT_READ|PROT_WRITE,
+	   MAP_ANON|MAP_PRIVATE, -1, 0);
+	if (addr == MAP_FAILED)
+		goto mapfailed;
+	p->froms = addr;
+
+	addr = mmap(NULL, p->tossize,  PROT_READ|PROT_WRITE,
+	   MAP_ANON|MAP_PRIVATE, -1, 0);
+	if (addr == MAP_FAILED)
+		goto mapfailed;
+	p->tos = addr;
+	p->tos[0].link = 0;
+
+	o = p->highpc - p->lowpc;
+	if (p->kcountsize < o) {
 #ifndef notdef
-        s_scale = ((float)p->kcountsize / o) * SCALE_1_TO_1;
+		s_scale = ((float)p->kcountsize / o ) * SCALE_1_TO_1;
 #else /* avoid floating point */
-        int quot = o / p->kcountsize;
+		int quot = o / p->kcountsize;
 
-        if (quot >= 0x10000)
-            s_scale = 1;
-        else if (quot >= 0x100)
-            s_scale = 0x10000 / quot;
-        else if (o >= 0x800000)
-            s_scale = 0x1000000 / (o / (p->kcountsize >> 8));
-        else
-            s_scale = 0x1000000 / ((o << 8) / p->kcountsize);
+		if (quot >= 0x10000)
+			s_scale = 1;
+		else if (quot >= 0x100)
+			s_scale = 0x10000 / quot;
+		else if (o >= 0x800000)
+			s_scale = 0x1000000 / (o / (p->kcountsize >> 8));
+		else
+			s_scale = 0x1000000 / ((o << 8) / p->kcountsize);
 #endif
-    }
-    else
-        s_scale = SCALE_1_TO_1;
+	} else
+		s_scale = SCALE_1_TO_1;
 
-    moncontrol(1);
-    return;
+	moncontrol(1);
+	return;
 
 mapfailed:
-    if (p->kcount != NULL)
-    {
-        munmap(p->kcount, p->kcountsize);
-        p->kcount = NULL;
-    }
-    if (p->froms != NULL)
-    {
-        munmap(p->froms, p->fromssize);
-        p->froms = NULL;
-    }
-    if (p->tos != NULL)
-    {
-        munmap(p->tos, p->tossize);
-        p->tos = NULL;
-    }
-    ERR("monstartup: out of memory\n");
+	if (p->kcount != NULL) {
+		munmap(p->kcount, p->kcountsize);
+		p->kcount = NULL;
+	}
+	if (p->froms != NULL) {
+		munmap(p->froms, p->fromssize);
+		p->froms = NULL;
+	}
+	if (p->tos != NULL) {
+		munmap(p->tos, p->tossize);
+		p->tos = NULL;
+	}
+	ERR("monstartup: out of memory\n");
 }
-__strong_alias(_monstartup, monstartup);
+__strong_alias(_monstartup,monstartup);
 
-void _mcleanup(void)
+void
+_mcleanup(void)
 {
-    int fd;
-    int fromindex;
-    int endfrom;
-    u_long frompc;
-    int toindex;
-    struct rawarc rawarc;
-    struct gmonparam* p = &_gmonparam;
-    struct gmonhdr gmonhdr, *hdr;
-    struct clockinfo clockinfo;
-    const int mib[2] = { CTL_KERN, KERN_CLOCKRATE };
-    size_t size;
-    char* profdir;
-    char* proffile;
-    char buf[PATH_MAX];
+	struct gmon_trace *fd;
+	int fromindex;
+	int endfrom;
+	u_long frompc;
+	int toindex;
+	struct rawarc rawarc;
+	struct gmonparam *p = &_gmonparam;
+	struct gmonhdr gmonhdr, *hdr;
+	struct clockinfo clockinfo;
+	const int mib[2] = { CTL_KERN, KERN_CLOCKRATE };
+	size_t size;
+	char *profdir;
+	char *proffile;
+	char  buf[PATH_MAX];
 #ifdef DEBUG
-    int log, len;
-    char dbuf[200];
+	int log, len;
+	char dbuf[200];
 #endif
 
-    if (p->state == GMON_PROF_ERROR)
-        ERR("_mcleanup: tos overflow\n");
+	if (p->state == GMON_PROF_ERROR)
+		ERR("_mcleanup: tos overflow\n");
 
-    size = sizeof(clockinfo);
-    if (sysctl(mib, 2, &clockinfo, &size, NULL, 0) == -1)
-    {
-        /*
-         * Best guess
-         */
-        clockinfo.profhz = hertz();
-    }
-    else if (clockinfo.profhz == 0)
-    {
-        if (clockinfo.hz != 0)
-            clockinfo.profhz = clockinfo.hz;
-        else
-            clockinfo.profhz = hertz();
-    }
+	size = sizeof(clockinfo);
+	if (sysctl(mib, 2, &clockinfo, &size, NULL, 0) == -1) {
+		/*
+		* Best guess
+		*/
+		clockinfo.profhz = hertz();
+	} else if (clockinfo.profhz == 0) {
+		if (clockinfo.hz != 0)
+			clockinfo.profhz = clockinfo.hz;
+		else
+			clockinfo.profhz = hertz();
+	}
 
-    moncontrol(0);
-
-    if (issetugid() == 0 && (profdir = getenv("PROFDIR")) != NULL)
-    {
-        char *s, *t, *limit;
-        pid_t pid;
-        long divisor;
-
-        /* If PROFDIR contains a null value, no profiling
-          output is produced */
-        if (*profdir == '\0')
-        {
-            return;
-        }
-
-        limit = buf + sizeof buf - 1 - 10 - 1 - strlen(__progname) - 1;
-        t = buf;
-        s = profdir;
-        while ((*t = *s) != '\0' && t < limit)
-        {
-            t++;
-            s++;
-        }
-        *t++ = '/';
-
-        /*
-         * Copy and convert pid from a pid_t to a string.  For
-         * best performance, divisor should be initialized to
-         * the largest power of 10 less than PID_MAX.
-         */
-        pid = getpid();
-        divisor = 10000;
-        while (divisor > pid)
-            divisor /= 10; /* skip leading zeros */
-        do
-        {
-            *t++ = (pid / divisor) + '0';
-            pid %= divisor;
-        } while (divisor /= 10);
-        *t++ = '.';
-
-        s = __progname;
-        while ((*t++ = *s++) != '\0')
-            ;
-
-        proffile = buf;
-    }
-    else
-    {
-        proffile = "gmon.out";
-    }
-
-    printf("%d: ##### OPEN gmon.out #####\n", __LINE__);
-    fd = open(proffile, O_CREAT | O_TRUNC | O_WRONLY, 0664);
-    if (fd == -1)
-    {
-        perror(proffile);
-        return;
-    }
-#ifdef DEBUG
-    printf("%d: ##### OPEN gmon.log #####\n", __LINE__);
-    log = open("gmon.log", O_CREAT | O_TRUNC | O_WRONLY, 0664);
-    if (log == -1)
-    {
-        perror("mcount: gmon.log");
-        close(fd);
-        return;
-    }
-    snprintf(dbuf, sizeof dbuf, "[mcleanup1] kcount 0x%x ssiz %d\n", p->kcount,
-             p->kcountsize);
-    printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
-    write(log, dbuf, strlen(dbuf));
+#ifdef pledge_allows_profil
+	moncontrol(0);
 #endif
-    hdr = (struct gmonhdr*)&gmonhdr;
-    bzero(hdr, sizeof(*hdr));
-    hdr->lpc = p->lowpc;
-    hdr->hpc = p->highpc;
-    hdr->ncnt = p->kcountsize + sizeof(gmonhdr);
-    hdr->version = GMONVERSION;
-    hdr->profrate = clockinfo.profhz;
 
-    printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
-    write(fd, (char*)hdr, sizeof *hdr);
-    write(fd, p->kcount, p->kcountsize);
-    endfrom = p->fromssize / sizeof(*p->froms);
-    for (fromindex = 0; fromindex < endfrom; fromindex++)
-    {
-        if (p->froms[fromindex] == 0)
-            continue;
+	if (issetugid() == 0 && (profdir = getenv("PROFDIR")) != NULL) {
+		char *s, *t, *limit;
+		pid_t pid;
+		long divisor;
 
-        frompc = p->lowpc;
-        frompc += fromindex * p->hashfraction * sizeof(*p->froms);
-        for (toindex = p->froms[fromindex]; toindex != 0;
-             toindex = p->tos[toindex].link)
-        {
+		/* If PROFDIR contains a null value, no profiling
+		  output is produced */
+		if (*profdir == '\0') {
+			return;
+		}
+
+		limit = buf + sizeof buf - 1 - 10 - 1 -
+		   strlen(__progname) - 1;
+		t = buf;
+		s = profdir;
+		while((*t = *s) != '\0' && t < limit) {
+			t++;
+			s++;
+		}
+		*t++ = '/';
+
+		/*
+		* Copy and convert pid from a pid_t to a string.  For
+		* best performance, divisor should be initialized to
+		* the largest power of 10 less than PID_MAX.
+		*/
+		pid = getpid();
+		divisor=10000;
+		while (divisor > pid) divisor /= 10;	/* skip leading zeros */
+		do {
+			*t++ = (pid/divisor) + '0';
+			pid %= divisor;
+		} while (divisor /= 10);
+		*t++ = '.';
+
+		s = __progname;
+		while ((*t++ = *s++) != '\0')
+			;
+
+		proffile = buf;
+	} else {
+		proffile = "gmon.out";
+	}
+
+	printf("%d: ##### OPEN gmon.out #####\n", __LINE__);
+	fd = utrace_open(proffile , O_CREAT|O_TRUNC|O_WRONLY, 0664);
+	if (fd == -1) {
+		perror( proffile );
+		return;
+	}
 #ifdef DEBUG
-            (void)snprintf(dbuf, sizeof dbuf,
-                           "[mcleanup2] frompc 0x%x selfpc 0x%x count %d\n",
-                           frompc, p->tos[toindex].selfpc,
-                           p->tos[toindex].count);
-            printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
-            write(log, dbuf, strlen(dbuf));
+	printf("%d: ##### OPEN gmon.log #####\n", __LINE__);
+	log = open("gmon.log", O_CREAT|O_TRUNC|O_WRONLY, 0664);
+	if (log == -1) {
+		perror("mcount: gmon.log");
+		close(fd);
+		return;
+	}
+	snprintf(dbuf, sizeof dbuf, "[mcleanup1] kcount 0x%x ssiz %d\n",
+	   p->kcount, p->kcountsize);
+	printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
+	write(log, dbuf, strlen(dbuf));
 #endif
-            rawarc.raw_frompc = frompc;
-            rawarc.raw_selfpc = p->tos[toindex].selfpc;
-            rawarc.raw_count = p->tos[toindex].count;
-            printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
-            write(fd, &rawarc, sizeof rawarc);
-        }
-    }
-    close(fd);
+	hdr = (struct gmonhdr *)&gmonhdr;
+	bzero(hdr, sizeof(*hdr));
+	hdr->lpc = p->lowpc;
+	hdr->hpc = p->highpc;
+	hdr->ncnt = p->kcountsize + sizeof(gmonhdr);
+	hdr->version = GMONVERSION;
+	hdr->profrate = clockinfo.profhz;
+
+	printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
+	utrace_write(fd, (char *)hdr, sizeof *hdr);
+	utrace_write(fd, p->kcount, p->kcountsize);
+	endfrom = p->fromssize / sizeof(*p->froms);
+	for (fromindex = 0; fromindex < endfrom; fromindex++) {
+		if (p->froms[fromindex] == 0)
+			continue;
+
+		frompc = p->lowpc;
+		frompc += fromindex * p->hashfraction * sizeof(*p->froms);
+		for (toindex = p->froms[fromindex]; toindex != 0;
+		    toindex = p->tos[toindex].link) {
+#ifdef DEBUG
+			(void) snprintf(dbuf, sizeof dbuf,
+			"[mcleanup2] frompc 0x%x selfpc 0x%x count %d\n" ,
+				frompc, p->tos[toindex].selfpc,
+				p->tos[toindex].count);
+			printf("%d: ##### WRITE gmon.log #####\n", __LINE__);
+			write(log, dbuf, strlen(dbuf));
+#endif
+			rawarc.raw_frompc = frompc;
+			rawarc.raw_selfpc = p->tos[toindex].selfpc;
+			rawarc.raw_count = p->tos[toindex].count;
+			printf("%d: ##### WRITE gmon.out #####\n", __LINE__);
+			utrace_write(fd, &rawarc, sizeof rawarc);
+		}
+	}
+	utrace_close(fd);
 #ifdef notyet
-    if (p->kcount != NULL)
-    {
-        munmap(p->kcount, p->kcountsize);
-        p->kcount = NULL;
-    }
-    if (p->froms != NULL)
-    {
-        munmap(p->froms, p->fromssize);
-        p->froms = NULL;
-    }
-    if (p->tos != NULL)
-    {
-        munmap(p->tos, p->tossize);
-        p->tos = NULL;
-    }
+	if (p->kcount != NULL) {
+		munmap(p->kcount, p->kcountsize);
+		p->kcount = NULL;
+	}
+	if (p->froms != NULL) {
+		munmap(p->froms, p->fromssize);
+		p->froms = NULL;
+	}
+	if (p->tos != NULL) {
+		munmap(p->tos, p->tossize);
+		p->tos = NULL;
+	}
 #endif
 }
 
@@ -312,22 +337,21 @@ void _mcleanup(void)
  *	profiling is what mcount checks to see if
  *	all the data structures are ready.
  */
-void moncontrol(int mode)
+void
+moncontrol(int mode)
 {
-    struct gmonparam* p = &_gmonparam;
+	struct gmonparam *p = &_gmonparam;
 
-    if (mode)
-    {
-        /* start */
-        profil((char*)p->kcount, p->kcountsize, p->lowpc, s_scale);
-        p->state = GMON_PROF_ON;
-    }
-    else
-    {
-        /* stop */
-        profil(NULL, 0, 0, 0);
-        p->state = GMON_PROF_OFF;
-    }
+	if (mode) {
+		/* start */
+		profil((char *)p->kcount, p->kcountsize, p->lowpc,
+		   s_scale);
+		p->state = GMON_PROF_ON;
+	} else {
+		/* stop */
+		profil(NULL, 0, 0, 0);
+		p->state = GMON_PROF_OFF;
+	}
 }
 DEF_WEAK(moncontrol);
 
@@ -335,17 +359,18 @@ DEF_WEAK(moncontrol);
  * discover the tick frequency of the machine
  * if something goes wrong, we return 0, an impossible hertz.
  */
-static int hertz(void)
+static int
+hertz(void)
 {
-    struct itimerval tim;
+	struct itimerval tim;
 
-    tim.it_interval.tv_sec = 0;
-    tim.it_interval.tv_usec = 1;
-    tim.it_value.tv_sec = 0;
-    tim.it_value.tv_usec = 0;
-    setitimer(ITIMER_REAL, &tim, 0);
-    setitimer(ITIMER_REAL, 0, &tim);
-    if (tim.it_interval.tv_usec < 2)
-        return (0);
-    return (1000000 / tim.it_interval.tv_usec);
+	tim.it_interval.tv_sec = 0;
+	tim.it_interval.tv_usec = 1;
+	tim.it_value.tv_sec = 0;
+	tim.it_value.tv_usec = 0;
+	setitimer(ITIMER_REAL, &tim, 0);
+	setitimer(ITIMER_REAL, 0, &tim);
+	if (tim.it_interval.tv_usec < 2)
+		return(0);
+	return (1000000 / tim.it_interval.tv_usec);
 }
