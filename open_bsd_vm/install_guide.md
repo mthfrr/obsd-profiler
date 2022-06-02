@@ -24,7 +24,30 @@ qemu-system-x86_64 -hda obsd.qcow2 -cdrom install71.iso -monitor stdio
 
 ## 4. Install
 
-...
+keyboard:
+hostname: **obsd**
+net iface conf:
+ipv4:
+ipv6:
+net iface conf:
+root pwd: root
+sshd autostart:
+run X:
+started by xenodm: **yes**
+default console:
+user: **pol**
+fullname:
+password: pol
+ssh root login: **yes**
+timezone:
+root disk:
+whole disk MBR:
+auto layout:
+location of sets:
+pathname:
+select sets:
+continue without verif: **yes**
+location of sets:
 
 ## 5. Setup ssh
 
@@ -42,27 +65,23 @@ ssh-copy-id -p 10022 root@localhost
 
 `halt -p` to power off
 
-## 6. Install stuff
+## 6. Setup doas
 
-upgrade
-
-```sh
-TERM=xterm pkg_add -u
+```
+# in /etc/doas.conf
+permit nopass keepenv setenv { PATH } pol as root
 ```
 
-### Setup ports
+## 7. Update and install
 
 ```sh
-cd /tmp
-ftp https://cdn.openbsd.org/pub/OpenBSD/$(uname -r)/{ports.tar.gz,SHA256.sig}
-signify -Cp /etc/signify/openbsd-$(uname -r | cut -c 1,3)-base.pub -x SHA256.sig ports.tar.gz
-
-cd /usr
-tar xzf /tmp/ports.tar.gz
+TERM=xterm doas pkg_add vim kitty node git wget
 ```
 
-### Install with ports
+## 8. my config
 
 ```sh
-pkg_add portslist
+git clone https://github.com/mthfrr/config.git
+cp config/.kshrc .
+echo ". ~/.kshrc" >> .profile
 ```
