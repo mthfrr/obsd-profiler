@@ -43,3 +43,33 @@ From                To                  Syms Read   Shared Object Library
 ## with debug ld.so
 
 `ld -e __start --eh-frame-hdr -Bdynamic -dynamic-linker /usr/src/libexec/ld.so/ld.so -o a.out /usr/lib/gcrt0.o /usr/lib/crtbegin.o -L/usr/src/lib/libc cat.o -lc_p -L/usr/lib -lcompiler_rt /usr/lib/crtend.o`
+
+## Link with c vs c_p
+
+| option | result   |
+| ------ | -------- |
+| -lc    | works    |
+| -lc_p  | segfault |
+
+## LD_DEBUG
+
+```
+ld.so loading: 'a.out'
+exe load offset:  0xda06b12c000
+ flags ./a.out = 0x8000000
+head ./a.out
+obj ./a.out has ./a.out as head
+examining: './a.out'
+ flags /usr/src/libexec/ld.so/ld.so = 0x0
+obj /usr/src/libexec/ld.so/ld.so has ./a.out as head
+static tls size=0 align=8 offset=0
+	Start            End              Type  Open Ref GrpRef Name
+	00000da06b12c000 00000da06b154000 exe   1    0   0      ./a.out
+	00000da311b54000 00000da311b54000 ld.so 0    1   0      /usr/src/libexec/ld.so/ld.so
+dynamic loading done, success.
+tib new=0xda28803a940
+doing preinitarray obj 0xda323f57800 @0xda06b14c220: [./a.out]
+version 0 callbacks requested
+Segmentation fault (core dumped)
+
+```
