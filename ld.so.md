@@ -244,3 +244,81 @@ eflags         0x346               [    PF ZF TF IF ]
 eflags         0x347               [ CF PF ZF TF IF ]
 
 ```
+
+## kernel
+
+sys/arch/amd64/amd64/trap.c:syscall:518
+
+since CF is set: we went through `bad:`
+which mean copyin() return an error.
+which is 1 since rax is equal to 1
+
+# EXPLICATION
+
+There is a kernel check when doing syscall asserting
+that PC is in read-on memory or in permitted text:
+`un-writeable permitted text (sigtramp, libc, ld.so)`
+
+[zepourquoi](https://marc.info/?l=openbsd-tech&m=157488907117170)
+
+```
+For static binaries, the valid regions are the base program's text
+segment and the signal trampoline page.
+
+For dynamic binaries, valid regions are ld.so's text segment, the signal
+trampoline, and libc.so's text segment... AND the main program's text.
+```
+
+## static to shared
+
+`cc -shared -o libc_p.so -Wl,--whole-archive -lc_p`
+
+## procmap ?
+
+> procmap has benen updated to show the syscall regions with 'e' and the
+> stack regions with 'S'.
+
+`$rip=0x3ea66949790` -> third map : r-x--p- !missing e
+
+```
+pol@obsd /home/pol/cat $ doas procmap -a 60001
+Start            End                 Size  Offset           rwxSepc  RWX  I/W/A Dev     Inode - File
+0000000000001000-0000000000001000       0k 0000000000000000 -----s- (---) 0/0/0 00:00       0 -   [ anon ]
+000003ea6692d000-000003ea66932fff      24k 0000000000000000 r----p- (rwx) 1/0/0 00:10  699902 - /home/pol/cat/a.out [0xfffffd812646a318]
+000003ea66933000-000003ea6694cfff     104k 0000000000005000 r-x--p- (rwx) 1/0/0 00:10  699902 - /home/pol/cat/a.out [0xfffffd812646a318]
+000003ea6694d000-000003ea6694dfff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ea6694e000-000003ea6694efff       4k 000000000001e000 rw---p- (rwx) 1/0/0 00:10  699902 - /home/pol/cat/a.out [0xfffffd812646a318]
+000003ea6694f000-000003ea6694ffff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ea66950000-000003ea66954fff      20k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ec6694d000-000003ec6694d000       0k 0000000000000000 -----s- (---) 0/0/0 00:00       0 -   [ anon ]
+000003ec68efd000-000003ec68efdfff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ec70669000-000003ec70669fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ec76d45000-000003ec76d45fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ec8c641000-000003ec8c641fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ec931d4000-000003ec931d4fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ecad368000-000003ecad368fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ecaf0ab000-000003ecaf0abfff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ecd3fd6000-000003ecd3fd6fff       4k 0000000000000000 r-x-ep+ (rwx) 1/0/1 00:00       0 -   [ uvm_aobj ]
+000003ecdbbf6000-000003ecdbbf6fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003eced182000-000003eced182fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ecf8361000-000003ecf8361fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed050a8000-000003ed050a8fff       4k 0000000000000000 r----s- (r--) 1/0/1 00:00       0 -   [ uvm_aobj ]
+000003ed0bae9000-000003ed0bae9fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed10314000-000003ed10316fff      12k 0000000000000000 r----p+ (rwx) 1/0/0 00:08  151222 - /usr/src/libexec/ld.so/ld.so [0xfffffd811a8a2b08]
+000003ed10416000-000003ed10423fff      56k 0000000000002000 r-x-ep- (rwx) 1/0/0 00:08  151222 - /usr/src/libexec/ld.so/ld.so [0xfffffd811a8a2b08]
+000003ed10514000-000003ed10514fff       4k 0000000000010000 r----p- (rwx) 1/0/0 00:08  151222 - /usr/src/libexec/ld.so/ld.so [0xfffffd811a8a2b08]
+000003ed10515000-000003ed10515fff       4k 0000000000011000 rw---p- (rwx) 1/0/0 00:08  151222 - /usr/src/libexec/ld.so/ld.so [0xfffffd811a8a2b08]
+000003ed10516000-000003ed10516fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed12cba000-000003ed12cbafff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed19c8a000-000003ed19c8afff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed1a1a9000-000003ed1a1a9fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed2f873000-000003ed2f873fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed31092000-000003ed31092fff       4k 0000000000000000 -----p+ (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed31093000-000003ed31094fff       8k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed31095000-000003ed31095fff       4k 0000000000000000 -----p+ (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed4b2fd000-000003ed4b2fdfff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+000003ed4c9b9000-000003ed4c9b9fff       4k 0000000000000000 rw---p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+00007f7ffded6000-00007f7fffbd5fff   29696k 0000000000000000 -----p+ (rwx) 1/0/0 00:00       0 -   [ stack ]
+00007f7fffbd6000-00007f7ffffd5fff    4096k 0000000000000000 rw-S-p- (rwx) 1/0/0 00:00       0 -   [ anon ]
+ total                               4420k
+```
