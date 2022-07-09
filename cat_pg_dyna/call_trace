@@ -1,0 +1,7 @@
+0x42330d5fd50: _dl_start () at /usr/src/libexec/ld.so/amd64/ldasm.S:40
+...skip
+0x4208635aa77: _libc_preinit (argc=1, argv=0x7f7ffffd5798, envp=0x7f7ffffd57a8, cb=0x11d4683ece0 <_dl_cb_cb>) at dlfcn/init.c:77
+...skip
+0x4208636f790: issetugid ()
+
+0x4208636f7a3: syscall instruction

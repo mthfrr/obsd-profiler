@@ -1,0 +1,690 @@
+Index: sys/sys/exec.h
+===================================================================
+RCS file: /cvs/src/sys/sys/exec.h,v
+retrieving revision 1.38
+diff -u -p -u -r1.38 exec.h
+--- sys/sys/exec.h	1 Jun 2018 03:27:59 -0000	1.38
++++ sys/sys/exec.h	26 Nov 2019 23:25:47 -0000
+@@ -99,6 +99,7 @@ struct exec_vmcmd {
+ #define VMCMD_RELATIVE  0x0001  /* ev_addr is relative to base entry */
+ #define VMCMD_BASE      0x0002  /* marks a base entry */
+ #define VMCMD_STACK     0x0004  /* create with UVM_FLAG_STACK */
++#define VMCMD_SYSCALL   0x0008  /* create with UVM_FLAG_SYSCALL */
+ };
+ 
+ #define	EXEC_DEFAULT_VMCMD_SETSIZE	8	/* # of cmds in set to start */
+Index: sys/sys/syscall_mi.h
+===================================================================
+RCS file: /cvs/src/sys/sys/syscall_mi.h,v
+retrieving revision 1.23
+diff -u -p -u -r1.23 syscall_mi.h
+--- sys/sys/syscall_mi.h	4 Nov 2019 18:06:03 -0000	1.23
++++ sys/sys/syscall_mi.h	25 Nov 2019 22:57:10 -0000
+@@ -73,9 +73,9 @@ mi_syscall(struct proc *p, register_t co
+ 	    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
+ 		return (EPERM);
+ 
+-	/* PC must not be in writeable memory */
++	/* PC must be in un-writeable permitted text (sigtramp, libc, ld.so) */
+ 	if (!uvm_map_inentry(p, &p->p_pcinentry, PROC_PC(p),
+-	    "[%s]%d/%d pc=%lx inside %lx-%lx: writeable syscall\n",
++	    "[%s]%d/%d pc=%lx inside %lx-%lx: bogus syscall\n",
+ 	    uvm_map_inentry_pc, p->p_vmspace->vm_map.wserial))
+ 		return (EPERM);
+ 
+Index: sys/kern/exec_elf.c
+===================================================================
+RCS file: /cvs/src/sys/kern/exec_elf.c,v
+retrieving revision 1.151
+diff -u -p -u -r1.151 exec_elf.c
+--- sys/kern/exec_elf.c	13 May 2019 19:21:31 -0000	1.151
++++ sys/kern/exec_elf.c	27 Nov 2019 19:59:17 -0000
+@@ -456,7 +456,7 @@ elf_load_file(struct proc *p, char *path
+ 				addr = ph[i].p_vaddr - base_ph->p_vaddr;
+ 			}
+ 			elf_load_psection(&epp->ep_vmcmds, nd.ni_vp,
+-			    &ph[i], &addr, &size, &prot, flags);
++			    &ph[i], &addr, &size, &prot, flags | VMCMD_SYSCALL);
+ 			/* If entry is within this section it must be text */
+ 			if (eh.e_entry >= ph[i].p_vaddr &&
+ 			    eh.e_entry < (ph[i].p_vaddr + size)) {
+@@ -621,6 +621,19 @@ exec_elf_makecmds(struct proc *p, struct
+ 				}
+ 			} else
+ 				addr = ELF_NO_ADDR;
++			/*
++			 * static binary: main program does system calls
++			 * dynamic binary: regular main program won't do system
++			 * calls, unfortunately go binaries do...
++			 */
++			flags |= VMCMD_SYSCALL;
++			if (interp == NULL) {
++				/*
++				 * static binary: no ld.so, no late request for
++				 * syscalls inside libc,so block msyscall()
++				 */
++				p->p_vmspace->vm_map.flags |= VM_MAP_SYSCALL_ONCE;
++			}
+ 
+ 			/*
+ 			 * Calculates size of text and data segments
+Index: sys/kern/exec_subr.c
+===================================================================
+RCS file: /cvs/src/sys/kern/exec_subr.c,v
+retrieving revision 1.56
+diff -u -p -u -r1.56 exec_subr.c
+--- sys/kern/exec_subr.c	21 Jun 2019 09:39:48 -0000	1.56
++++ sys/kern/exec_subr.c	26 Nov 2019 20:21:15 -0000
+@@ -167,6 +167,7 @@ vmcmd_map_pagedvn(struct proc *p, struct
+ 	 * call this routine.
+ 	 */
+ 	struct uvm_object *uobj;
++	unsigned int syscalls = 0;
+ 	int error;
+ 
+ 	/*
+@@ -193,11 +194,13 @@ vmcmd_map_pagedvn(struct proc *p, struct
+ 	/*
+ 	 * do the map
+ 	 */
++	if ((cmd->ev_flags & VMCMD_SYSCALL) && (cmd->ev_prot & PROT_EXEC))
++		syscalls |= UVM_FLAG_SYSCALL;
+ 
+ 	error = uvm_map(&p->p_vmspace->vm_map, &cmd->ev_addr, cmd->ev_len,
+ 	    uobj, cmd->ev_offset, 0,
+ 	    UVM_MAPFLAG(cmd->ev_prot, PROT_MASK, MAP_INHERIT_COPY,
+-	    MADV_NORMAL, UVM_FLAG_COPYONW|UVM_FLAG_FIXED));
++	    MADV_NORMAL, UVM_FLAG_COPYONW | UVM_FLAG_FIXED | syscalls));
+ 
+ 	/*
+ 	 * check for error
+Index: sys/kern/init_main.c
+===================================================================
+RCS file: /cvs/src/sys/kern/init_main.c,v
+retrieving revision 1.292
+diff -u -p -u -r1.292 init_main.c
+--- sys/kern/init_main.c	4 Nov 2019 17:51:22 -0000	1.292
++++ sys/kern/init_main.c	17 Nov 2019 17:59:04 -0000
+@@ -651,7 +651,8 @@ start_init(void *arg)
+ 	if (uvm_map(&p->p_vmspace->vm_map, &addr, PAGE_SIZE, 
+ 	    NULL, UVM_UNKNOWN_OFFSET, 0,
+ 	    UVM_MAPFLAG(PROT_READ | PROT_WRITE, PROT_MASK, MAP_INHERIT_COPY,
+-	    MADV_NORMAL, UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW|UVM_FLAG_STACK)))
++	    MADV_NORMAL,
++	    UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW|UVM_FLAG_STACK|UVM_FLAG_SYSCALL)))
+ 		panic("init: couldn't allocate argument space");
+ 
+ 	for (pathp = &initpaths[0]; (path = *pathp) != NULL; pathp++) {
+Index: sys/kern/kern_exec.c
+===================================================================
+RCS file: /cvs/src/sys/kern/kern_exec.c,v
+retrieving revision 1.209
+diff -u -p -u -r1.209 kern_exec.c
+--- sys/kern/kern_exec.c	5 Nov 2019 08:18:47 -0000	1.209
++++ sys/kern/kern_exec.c	26 Nov 2019 04:29:14 -0000
+@@ -856,7 +856,7 @@ exec_sigcode_map(struct process *pr, str
+ 	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_sigcode, round_page(sz),
+ 	    e->e_sigobject, 0, 0, UVM_MAPFLAG(PROT_READ | PROT_EXEC,
+ 	    PROT_READ | PROT_WRITE | PROT_EXEC, MAP_INHERIT_COPY,
+-	    MADV_RANDOM, UVM_FLAG_COPYONW))) {
++	    MADV_RANDOM, UVM_FLAG_COPYONW | UVM_FLAG_SYSCALL))) {
+ 		uao_detach(e->e_sigobject);
+ 		return (ENOMEM);
+ 	}
+Index: sys/uvm/uvm.h
+===================================================================
+RCS file: /cvs/src/sys/uvm/uvm.h,v
+retrieving revision 1.65
+diff -u -p -u -r1.65 uvm.h
+--- sys/uvm/uvm.h	18 Jul 2019 23:47:33 -0000	1.65
++++ sys/uvm/uvm.h	17 Nov 2019 17:54:44 -0000
+@@ -91,6 +91,7 @@ struct uvm {
+ #define UVM_ET_STACK		0x0040	/* this is a stack */
+ #define UVM_ET_WC		0x0080	/* write combining */
+ #define UVM_ET_CONCEAL		0x0100	/* omit from dumps */
++#define UVM_ET_SYSCALL		0x0200	/* syscall text segment */
+ #define UVM_ET_FREEMAPPED	0x8000	/* map entry is on free list (DEBUG) */
+ 
+ #define UVM_ET_ISOBJ(E)		(((E)->etype & UVM_ET_OBJ) != 0)
+Index: sys/uvm/uvm_extern.h
+===================================================================
+RCS file: /cvs/src/sys/uvm/uvm_extern.h,v
+retrieving revision 1.149
+diff -u -p -u -r1.149 uvm_extern.h
+--- sys/uvm/uvm_extern.h	5 Nov 2019 08:18:47 -0000	1.149
++++ sys/uvm/uvm_extern.h	17 Nov 2019 17:48:55 -0000
+@@ -114,6 +114,7 @@ typedef int		vm_prot_t;
+ #define UVM_FLAG_STACK   0x2000000 /* page may contain a stack */
+ #define UVM_FLAG_WC      0x4000000 /* write combining */
+ #define UVM_FLAG_CONCEAL 0x8000000 /* omit from dumps */
++#define UVM_FLAG_SYSCALL 0x10000000 /* system calls allowed */
+ 
+ /* macros to extract info */
+ #define UVM_PROTECTION(X)	((X) & PROT_MASK)
+Index: sys/uvm/uvm_map.c
+===================================================================
+RCS file: /cvs/src/sys/uvm/uvm_map.c,v
+retrieving revision 1.252
+diff -u -p -u -r1.252 uvm_map.c
+--- sys/uvm/uvm_map.c	26 Nov 2019 18:23:48 -0000	1.252
++++ sys/uvm/uvm_map.c	26 Nov 2019 20:04:57 -0000
+@@ -1080,6 +1080,10 @@ uvm_mapanon(struct vm_map *map, vaddr_t 
+ 	entry->advice = advice;
+ 	if (prot & PROT_WRITE)
+ 		map->wserial++;
++	if (flags & UVM_FLAG_SYSCALL) {
++		entry->etype |= UVM_ET_SYSCALL;
++		map->wserial++;
++	}
+ 	if (flags & UVM_FLAG_STACK) {
+ 		entry->etype |= UVM_ET_STACK;
+ 		if (flags & (UVM_FLAG_FIXED | UVM_FLAG_UNMAP))
+@@ -1345,6 +1349,10 @@ uvm_map(struct vm_map *map, vaddr_t *add
+ 	entry->advice = advice;
+ 	if (prot & PROT_WRITE)
+ 		map->wserial++;
++	if (flags & UVM_FLAG_SYSCALL) {
++		entry->etype |= UVM_ET_SYSCALL;
++		map->wserial++;
++	}
+ 	if (flags & UVM_FLAG_STACK) {
+ 		entry->etype |= UVM_ET_STACK;
+ 		if (flags & UVM_FLAG_UNMAP)
+@@ -1808,12 +1816,15 @@ uvm_map_inentry_sp(vm_map_entry_t entry)
+ /*
+  * If a syscall comes from a writeable entry, W^X is violated.
+  * (Would be nice if we can spot aliasing, which is also kind of bad)
++ * Ensure system call comes from libc or ld.so's text segment.
+  */
+ int
+ uvm_map_inentry_pc(vm_map_entry_t entry)
+ {
+ 	if (entry->protection & PROT_WRITE)
+ 		return (0);	/* not permitted */
++	if ((entry->etype & UVM_ET_SYSCALL) == 0)
++		return (0);	/* not permitted */
+ 	return (1);
+ }
+ 
+@@ -3089,12 +3100,14 @@ uvm_map_printit(struct vm_map *map, bool
+ 		    entry, entry->start, entry->end, entry->object.uvm_obj,
+ 		    (long long)entry->offset, entry->aref.ar_amap,
+ 		    entry->aref.ar_pageoff);
+-		(*pr)("\tsubmap=%c, cow=%c, nc=%c, stack=%c, prot(max)=%d/%d, inh=%d, "
++		(*pr)("\tsubmap=%c, cow=%c, nc=%c, stack=%c, "
++		    "syscall=%c, prot(max)=%d/%d, inh=%d, "
+ 		    "wc=%d, adv=%d\n",
+ 		    (entry->etype & UVM_ET_SUBMAP) ? 'T' : 'F',
+ 		    (entry->etype & UVM_ET_COPYONWRITE) ? 'T' : 'F',
+ 		    (entry->etype & UVM_ET_NEEDSCOPY) ? 'T' : 'F',
+ 		    (entry->etype & UVM_ET_STACK) ? 'T' : 'F',
++		    (entry->etype & UVM_ET_SYSCALL) ? 'T' : 'F',
+ 		    entry->protection, entry->max_protection,
+ 		    entry->inheritance, entry->wired_count, entry->advice);
+ 
+@@ -3511,7 +3524,7 @@ uvmspace_exec(struct proc *p, vaddr_t st
+ 		 * when a process execs another program image.
+ 		 */
+ 		vm_map_lock(map);
+-		vm_map_modflags(map, 0, VM_MAP_WIREFUTURE);
++		vm_map_modflags(map, 0, VM_MAP_WIREFUTURE|VM_MAP_SYSCALL_ONCE);
+ 
+ 		/*
+ 		 * now unmap the old program
+@@ -4284,6 +4297,45 @@ uvm_map_inherit(struct vm_map *map, vadd
+ 		entry = RBT_NEXT(uvm_map_addr, entry);
+ 	}
+ 
++	vm_map_unlock(map);
++	return (0);
++}
++
++/* 
++ * uvm_map_syscall: permit system calls for range of addrs in map.
++ *
++ * => map must be unlocked
++ */
++int
++uvm_map_syscall(struct vm_map *map, vaddr_t start, vaddr_t end)
++{
++	struct vm_map_entry *entry;
++
++	if (start > end)
++		return EINVAL;
++	start = MAX(start, map->min_offset);
++	end = MIN(end, map->max_offset);
++	if (start >= end)
++		return 0;
++	if (map->flags & VM_MAP_SYSCALL_ONCE)	/* only allowed once */
++		return (EPERM);
++
++	vm_map_lock(map);
++
++	entry = uvm_map_entrybyaddr(&map->addr, start);
++	if (entry->end > start)
++		UVM_MAP_CLIP_START(map, entry, start);
++	else
++		entry = RBT_NEXT(uvm_map_addr, entry);
++
++	while (entry != NULL && entry->start < end) {
++		UVM_MAP_CLIP_END(map, entry, end);
++		entry->etype |= UVM_ET_SYSCALL;
++		entry = RBT_NEXT(uvm_map_addr, entry);
++	}
++
++	map->wserial++;
++	map->flags |= VM_MAP_SYSCALL_ONCE;
+ 	vm_map_unlock(map);
+ 	return (0);
+ }
+Index: sys/uvm/uvm_map.h
+===================================================================
+RCS file: /cvs/src/sys/uvm/uvm_map.h,v
+retrieving revision 1.64
+diff -u -p -u -r1.64 uvm_map.h
+--- sys/uvm/uvm_map.h	2 Nov 2019 09:36:08 -0000	1.64
++++ sys/uvm/uvm_map.h	26 Nov 2019 18:34:04 -0000
+@@ -350,6 +350,7 @@ struct vm_map {
+ #define	VM_MAP_WANTLOCK		0x10		/* rw: want to write-lock */
+ #define VM_MAP_GUARDPAGES	0x20		/* rw: add guard pgs to map */
+ #define VM_MAP_ISVMSPACE	0x40		/* ro: map is a vmspace */
++#define VM_MAP_SYSCALL_ONCE	0x80		/* rw: libc syscall registered */
+ 
+ /* XXX: number of kernel maps and entries to statically allocate */
+ 
+@@ -395,6 +396,7 @@ int		uvm_map_extract(struct vm_map*, vad
+ 		    int);
+ vaddr_t		uvm_map_pie(vaddr_t);
+ vaddr_t		uvm_map_hint(struct vmspace *, vm_prot_t, vaddr_t, vaddr_t);
++int		uvm_map_syscall(vm_map_t, vaddr_t, vaddr_t);
+ int		uvm_map_inherit(vm_map_t, vaddr_t, vaddr_t, vm_inherit_t);
+ int		uvm_map_advice(vm_map_t, vaddr_t, vaddr_t, int);
+ void		uvm_map_init(void);
+Index: sys/uvm/uvm_mmap.c
+===================================================================
+RCS file: /cvs/src/sys/uvm/uvm_mmap.c,v
+retrieving revision 1.158
+diff -u -p -u -r1.158 uvm_mmap.c
+--- sys/uvm/uvm_mmap.c	27 Nov 2019 01:04:13 -0000	1.158
++++ sys/uvm/uvm_mmap.c	27 Nov 2019 01:26:27 -0000
+@@ -606,7 +606,7 @@ sys_msyscall(struct proc *p, void *v, re
+ 	if (addr > SIZE_MAX - size)
+ 		return (EINVAL);		/* disallow wrap-around. */
+ 
+-	return (0);
++	return (uvm_map_syscall(&p->p_vmspace->vm_map, addr, addr+size));
+ }
+ 
+ /*
+Index: libexec/ld.so/Makefile
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/Makefile,v
+retrieving revision 1.77
+diff -u -p -u -r1.77 Makefile
+--- libexec/ld.so/Makefile	20 Oct 2019 03:44:49 -0000	1.77
++++ libexec/ld.so/Makefile	26 Nov 2019 16:10:46 -0000
+@@ -28,7 +28,7 @@ SRCS+=	dl_uname.c dl_dirname.c strlcat.c
+ SRCS+=	malloc.c reallocarray.c tib.c ffs.c
+ 
+ syscall=__syscall close exit fstat getdents getentropy getthrid issetugid \
+-	mprotect munmap open pledge read __realpath sendsyslog \
++	mprotect munmap msyscall open pledge read __realpath sendsyslog \
+ 	__set_tcb sysctl thrkill utrace write
+ 
+ GEN_PREFIX=\t.file "${@:R}.c"\n\#include "SYS.h"
+Index: libexec/ld.so/library.c
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/library.c,v
+retrieving revision 1.83
+diff -u -p -u -r1.83 library.c
+--- libexec/ld.so/library.c	4 Oct 2019 17:42:16 -0000	1.83
++++ libexec/ld.so/library.c	26 Nov 2019 23:25:31 -0000
+@@ -102,7 +102,8 @@ _dl_tryload_shlib(const char *libname, i
+ 	Elf_Addr libaddr, loff, align = _dl_pagesz - 1;
+ 	Elf_Addr relro_addr = 0, relro_size = 0;
+ 	elf_object_t *object;
+-	char	hbuf[4096];
++	char	hbuf[4096], *exec_start = 0;
++	size_t exec_size = 0;
+ 	Elf_Dyn *dynp = NULL;
+ 	Elf_Ehdr *ehdr;
+ 	Elf_Phdr *phdp;
+@@ -253,6 +254,11 @@ _dl_tryload_shlib(const char *libname, i
+ 				_dl_load_list_free(load_list);
+ 				return(0);
+ 			}
++			if ((flags & PROT_EXEC) && exec_start == 0) {
++				exec_start = start;
++				exec_size = ROUND_PG(size);
++			}
++
+ 			if (phdp->p_flags & PF_W) {
+ 				/* Zero out everything past the EOF */
+ 				if ((size & align) != 0)
+@@ -301,6 +307,8 @@ _dl_tryload_shlib(const char *libname, i
+ 	    (Elf_Phdr *)((char *)libaddr + ehdr->e_phoff), ehdr->e_phnum,type,
+ 	    libaddr, loff);
+ 	if (object) {
++		char *soname = (char *)object->Dyn.info[DT_SONAME];
++
+ 		object->load_size = maxva - minva;	/*XXX*/
+ 		object->load_list = load_list;
+ 		/* set inode, dev from stat info */
+@@ -312,6 +320,13 @@ _dl_tryload_shlib(const char *libname, i
+ 		_dl_set_sod(object->load_name, &object->sod);
+ 		if (ptls != NULL && ptls->p_memsz)
+ 			_dl_set_tls(object, ptls, libaddr, libname);
++
++		/* Request permission for system calls in libc.so's text segment */
++		if (soname != NULL &&
++		    _dl_strncmp(soname, "libc.so.", 8) == 0) {
++			if (_dl_msyscall(exec_start, exec_size) == -1)
++				_dl_printf("msyscall %lx %lx error\n");
++		}
+ 	} else {
+ 		_dl_munmap((void *)libaddr, maxva - minva);
+ 		_dl_load_list_free(load_list);
+Index: libexec/ld.so/library_mquery.c
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/library_mquery.c,v
+retrieving revision 1.60
+diff -u -p -u -r1.60 library_mquery.c
+--- libexec/ld.so/library_mquery.c	4 Oct 2019 17:42:16 -0000	1.60
++++ libexec/ld.so/library_mquery.c	26 Nov 2019 23:43:16 -0000
+@@ -112,7 +112,8 @@ _dl_tryload_shlib(const char *libname, i
+ 	Elf_Phdr *ptls = NULL;
+ 	Elf_Addr relro_addr = 0, relro_size = 0;
+ 	struct stat sb;
+-	char hbuf[4096];
++	char hbuf[4096], *exec_start = 0;
++	size_t exec_size = 0;
+ 
+ #define ROUND_PG(x) (((x) + align) & ~(align))
+ #define TRUNC_PG(x) ((x) & ~(align))
+@@ -288,6 +289,11 @@ retry:
+ 		load_end = (Elf_Addr)ld->start + ROUND_PG(ld->size);
+ 	}
+ 
++	if ((flags & PROT_EXEC) && exec_start == 0) {
++		exec_start = ld->start;
++		exec_size = ROUND_PG(ld->size);
++	}
++
+ 	phdp = (Elf_Phdr *)(hbuf + ehdr->e_phoff);
+ 	for (i = 0; i < ehdr->e_phnum; i++, phdp++) {
+ 		if (phdp->p_type == PT_OPENBSD_RANDOMIZE)
+@@ -318,6 +324,13 @@ retry:
+ 		if (ptls != NULL && ptls->p_memsz)
+ 			_dl_set_tls(object, ptls, (Elf_Addr)lowld->start,
+ 			    libname);
++
++		/* Request permission for system calls in libc.so's text segment */
++		if (soname != NULL &&
++		    _dl_strncmp(soname, "libc.so.", 8) == 0) {
++			if (_dl_msyscall(exec_start, exec_size) == -1)
++				_dl_printf("msyscall %lx %lx error\n");
++		}
+ 	} else {
+ 		_dl_load_list_free(lowld);
+ 	}
+Index: libexec/ld.so/aarch64/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/aarch64/syscall.h,v
+retrieving revision 1.7
+diff -u -p -u -r1.7 syscall.h
+--- libexec/ld.so/aarch64/syscall.h	14 Jul 2019 03:23:12 -0000	1.7
++++ libexec/ld.so/aarch64/syscall.h	26 Nov 2019 16:11:22 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/alpha/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/alpha/syscall.h,v
+retrieving revision 1.41
+diff -u -p -u -r1.41 syscall.h
+--- libexec/ld.so/alpha/syscall.h	14 Jul 2019 03:23:12 -0000	1.41
++++ libexec/ld.so/alpha/syscall.h	26 Nov 2019 16:11:25 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/amd64/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/amd64/syscall.h,v
+retrieving revision 1.28
+diff -u -p -u -r1.28 syscall.h
+--- libexec/ld.so/amd64/syscall.h	14 Jul 2019 03:23:12 -0000	1.28
++++ libexec/ld.so/amd64/syscall.h	26 Nov 2019 16:11:28 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/arm/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/arm/syscall.h,v
+retrieving revision 1.28
+diff -u -p -u -r1.28 syscall.h
+--- libexec/ld.so/arm/syscall.h	14 Jul 2019 03:23:12 -0000	1.28
++++ libexec/ld.so/arm/syscall.h	26 Nov 2019 16:11:30 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/hppa/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/hppa/syscall.h,v
+retrieving revision 1.28
+diff -u -p -u -r1.28 syscall.h
+--- libexec/ld.so/hppa/syscall.h	14 Jul 2019 03:23:12 -0000	1.28
++++ libexec/ld.so/hppa/syscall.h	26 Nov 2019 16:11:33 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/i386/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/i386/syscall.h,v
+retrieving revision 1.32
+diff -u -p -u -r1.32 syscall.h
+--- libexec/ld.so/i386/syscall.h	14 Jul 2019 03:23:12 -0000	1.32
++++ libexec/ld.so/i386/syscall.h	26 Nov 2019 16:11:35 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/m88k/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/m88k/syscall.h,v
+retrieving revision 1.24
+diff -u -p -u -r1.24 syscall.h
+--- libexec/ld.so/m88k/syscall.h	14 Jul 2019 03:23:12 -0000	1.24
++++ libexec/ld.so/m88k/syscall.h	26 Nov 2019 16:11:37 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/mips64/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/mips64/syscall.h,v
+retrieving revision 1.30
+diff -u -p -u -r1.30 syscall.h
+--- libexec/ld.so/mips64/syscall.h	14 Jul 2019 03:23:12 -0000	1.30
++++ libexec/ld.so/mips64/syscall.h	26 Nov 2019 16:11:41 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/powerpc/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/powerpc/syscall.h,v
+retrieving revision 1.47
+diff -u -p -u -r1.47 syscall.h
+--- libexec/ld.so/powerpc/syscall.h	14 Jul 2019 03:23:12 -0000	1.47
++++ libexec/ld.so/powerpc/syscall.h	26 Nov 2019 16:11:43 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/sh/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/sh/syscall.h,v
+retrieving revision 1.27
+diff -u -p -u -r1.27 syscall.h
+--- libexec/ld.so/sh/syscall.h	14 Jul 2019 03:23:12 -0000	1.27
++++ libexec/ld.so/sh/syscall.h	26 Nov 2019 16:11:18 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: libexec/ld.so/sparc64/syscall.h
+===================================================================
+RCS file: /cvs/src/libexec/ld.so/sparc64/syscall.h,v
+retrieving revision 1.40
+diff -u -p -u -r1.40 syscall.h
+--- libexec/ld.so/sparc64/syscall.h	14 Jul 2019 03:23:12 -0000	1.40
++++ libexec/ld.so/sparc64/syscall.h	26 Nov 2019 16:11:15 -0000
+@@ -48,6 +48,7 @@ int	_dl_getthrid(void);
+ int	_dl_mprotect(const void *, size_t, int);
+ int	_dl_munmap(const void *, size_t);
+ int	_dl_open(const char *, int);
++int	_dl_msyscall(void *addr, size_t len);
+ ssize_t	_dl_read(int, const char *, size_t);
+ int	_dl_pledge(const char *, const char **);
+ long	_dl___syscall(quad_t, ...);
+Index: usr.sbin/procmap/procmap.c
+===================================================================
+RCS file: /cvs/src/usr.sbin/procmap/procmap.c,v
+retrieving revision 1.65
+diff -u -p -u -r1.65 procmap.c
+--- usr.sbin/procmap/procmap.c	5 Feb 2019 02:17:32 -0000	1.65
++++ usr.sbin/procmap/procmap.c	27 Nov 2019 20:59:05 -0000
+@@ -483,11 +483,11 @@ process_map(kvm_t *kd, pid_t pid, struct
+ 	/* headers */
+ #ifdef DISABLED_HEADERS
+ 	if (print_map)
+-		printf("%-*s %-*s rwx RWX CPY NCP I W A\n",
++		printf("%-*s   %-*s rwxSe RWX CPY NCP I W A\n",
+ 		    (int)sizeof(long) * 2 + 2, "Start",
+ 		    (int)sizeof(long) * 2 + 2, "End");
+ 	if (print_maps)
+-		printf("%-*s %-*s rwxp %-*s Dev   Inode      File\n",
++		printf("%-*s   %-*s   rwxSep %-*s Dev   Inode      File\n",
+ 		    (int)sizeof(long) * 2 + 0, "Start",
+ 		    (int)sizeof(long) * 2 + 0, "End",
+ 		    (int)sizeof(long) * 2 + 0, "Offset");
+@@ -497,7 +497,7 @@ process_map(kvm_t *kd, pid_t pid, struct
+ 		    (int)sizeof(int) * 2 - 1,  "Size ");
+ #endif
+ 	if (print_all)
+-		printf("%-*s %-*s %*s %-*s rwxpc  RWX  I/W/A Dev  %*s - File\n",
++		printf("%-*s %-*s %*s %-*s rwxpcSe  RWX  I/W/A Dev  %*s - File\n",
+ 		    (int)sizeof(long) * 2, "Start",
+ 		    (int)sizeof(long) * 2, "End",
+ 		    (int)sizeof(int)  * 2, "Size ",
+@@ -719,11 +719,14 @@ dump_vm_map_entry(kvm_t *kd, struct kbit
+ 	name = findname(kd, vmspace, vme, vp, vfs, uvm_obj);
+ 
+ 	if (print_map) {
+-		printf("0x%lx 0x%lx %c%c%c %c%c%c %s %s %d %d %d",
+-		    vme->start, vme->end,
++		printf("0x%-*lx 0x%-*lx %c%c%c%c%c %c%c%c %s %s %d %d %d",
++		    (int)sizeof(long) * 2 + 0, vme->start,
++		    (int)sizeof(long) * 2 + 0, vme->end,
+ 		    (vme->protection & PROT_READ) ? 'r' : '-',
+ 		    (vme->protection & PROT_WRITE) ? 'w' : '-',
+ 		    (vme->protection & PROT_EXEC) ? 'x' : '-',
++		    (vme->etype & UVM_ET_STACK) ? 'S' : '-',
++		    (vme->etype & UVM_ET_SYSCALL) ? 'e' : '-',
+ 		    (vme->max_protection & PROT_READ) ? 'r' : '-',
+ 		    (vme->max_protection & PROT_WRITE) ? 'w' : '-',
+ 		    (vme->max_protection & PROT_EXEC) ? 'x' : '-',
+@@ -743,12 +746,14 @@ dump_vm_map_entry(kvm_t *kd, struct kbit
+ 	}
+ 
+ 	if (print_maps)
+-		printf("%0*lx-%0*lx %c%c%c%c %0*lx %02x:%02x %llu     %s\n",
++		printf("0x%-*lx 0x%-*lx %c%c%c%c%c%c %0*lx %02x:%02x %llu     %s\n",
+ 		    (int)sizeof(void *) * 2, vme->start,
+ 		    (int)sizeof(void *) * 2, vme->end,
+ 		    (vme->protection & PROT_READ) ? 'r' : '-',
+ 		    (vme->protection & PROT_WRITE) ? 'w' : '-',
+ 		    (vme->protection & PROT_EXEC) ? 'x' : '-',
++		    (vme->etype & UVM_ET_STACK) ? 'S' : '-',
++		    (vme->etype & UVM_ET_SYSCALL) ? 'e' : '-',
+ 		    (vme->etype & UVM_ET_COPYONWRITE) ? 'p' : 's',
+ 		    (int)sizeof(void *) * 2,
+ 		    (unsigned long)vme->offset,
+@@ -761,11 +766,14 @@ dump_vm_map_entry(kvm_t *kd, struct kbit
+ 		    vme->start, vme->end,
+ 		    vme->object.uvm_obj, (unsigned long)vme->offset,
+ 		    vme->aref.ar_amap, vme->aref.ar_pageoff);
+-		printf("\tsubmap=%c, cow=%c, nc=%c, prot(max)=%d/%d, inh=%d, "
++		printf("\tsubmap=%c, cow=%c, nc=%c, stack=%c, "
++		    "syscall=%c, prot(max)=%d/%d, inh=%d, "
+ 		    "wc=%d, adv=%d\n",
+ 		    (vme->etype & UVM_ET_SUBMAP) ? 'T' : 'F',
+ 		    (vme->etype & UVM_ET_COPYONWRITE) ? 'T' : 'F',
+ 		    (vme->etype & UVM_ET_NEEDSCOPY) ? 'T' : 'F',
++		    (vme->etype & UVM_ET_STACK) ? 'T' : 'F',
++		    (vme->etype & UVM_ET_SYSCALL) ? 'T' : 'F',
+ 		    vme->protection, vme->max_protection,
+ 		    vme->inheritance, vme->wired_count, vme->advice);
+ 		if (inode && verbose)
+@@ -805,13 +813,15 @@ dump_vm_map_entry(kvm_t *kd, struct kbit
+ 		}
+ 
+ 		sz = (size_t)((vme->end - vme->start) / 1024);
+-		printf("%0*lx-%0*lx %7luk %0*lx %c%c%c%c%c (%c%c%c) %d/%d/%d %02u:%02u %7llu - %s",
++		printf("%0*lx-%0*lx %7luk %0*lx %c%c%c%c%c%c%c (%c%c%c) %d/%d/%d %02u:%02u %7llu - %s",
+ 		    (int)sizeof(void *) * 2, vme->start, (int)sizeof(void *) * 2,
+ 		    vme->end - (vme->start != vme->end ? 1 : 0), (unsigned long)sz,
+ 		    (int)sizeof(void *) * 2, (unsigned long)vme->offset,
+ 		    (vme->protection & PROT_READ) ? 'r' : '-',
+ 		    (vme->protection & PROT_WRITE) ? 'w' : '-',
+ 		    (vme->protection & PROT_EXEC) ? 'x' : '-',
++		    (vme->etype & UVM_ET_STACK) ? 'S' : '-',
++		    (vme->etype & UVM_ET_SYSCALL) ? 'e' : '-',
+ 		    (vme->etype & UVM_ET_COPYONWRITE) ? 'p' : 's',
+ 		    (vme->etype & UVM_ET_NEEDSCOPY) ? '+' : '-',
+ 		    (vme->max_protection & PROT_READ) ? 'r' : '-',

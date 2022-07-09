@@ -1,0 +1,32 @@
+ [different execution than other files]
+ 60281 ktrace   RET   ktrace 0
+ 60281 ktrace   CALL  execve(0x7f7fffff1f87,0x7f7fffff1e70,0x7f7fffff1e80)
+ 60281 ktrace   NAMI  "./a.out"
+ 60281 ktrace   ARGS  
+        [0] = "./a.out"
+ 60281 a.out    NAMI  "/usr/libexec/ld.so"
+ 60281 a.out    RET   execve 0
+ 60281 a.out    CALL  getentropy(0x7f7fffff0a80,40)
+ 60281 a.out    RET   getentropy 0
+ 60281 a.out    CALL  getentropy(0x7f7fffff0a80,40)
+ 60281 a.out    RET   getentropy 0
+ 60281 a.out    CALL  mmap(0,0x4000,0<PROT_NONE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 10173267968/0x25e5fc000
+ 60281 a.out    CALL  mprotect(0x25e5fd000,0x2000,0x3<PROT_READ|PROT_WRITE>)
+ 60281 a.out    RET   mprotect 0
+ 60281 a.out    CALL  mmap(0,0x1000,0x3<PROT_READ|PROT_WRITE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 10022760448/0x255673000
+ 60281 a.out    CALL  issetugid()
+ 60281 a.out    RET   issetugid 0
+ 60281 a.out    CALL  mprotect(0x281a45000,0x1000,0x1<PROT_READ>)
+ 60281 a.out    RET   mprotect 0
+ 60281 a.out    CALL  mmap(0,0x1000,0x3<PROT_READ|PROT_WRITE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 11534262272/0x2af7ee000
+ 60281 a.out    CALL  mmap(0,0x1000,0x3<PROT_READ|PROT_WRITE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 10507304960/0x27248c000
+ 60281 a.out    CALL  mmap(0,0x1000,0x3<PROT_READ|PROT_WRITE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 11924520960/0x2c6c1c000
+ 60281 a.out    CALL  mmap(0,0x1000,0x3<PROT_READ|PROT_WRITE>,0x1002<MAP_PRIVATE|MAP_ANON>,-1,0)
+ 60281 a.out    RET   mmap 10409050112/0x26c6d8000
+ 60281 a.out    PSIG  SIGSEGV SIG_DFL code SEGV_MAPERR<1> addr=0x30 trapno=6
+ 60281 a.out    NAMI  "a.out.core"
